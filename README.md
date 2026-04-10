@@ -13,6 +13,7 @@ Convert infographic-style PNGs into editable PowerPoint slides. This works surpr
 - background text removal via inpainting
 - aggressive OCR enabled by default for better recall
 - batch conversion: one input PNG per slide
+- this was "agentically engineered" so it is what it is
 
 ## Prerequisites
 
