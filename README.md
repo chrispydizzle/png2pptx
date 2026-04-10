@@ -1,6 +1,6 @@
 # png2pptx
 
-Convert infographic-style PNGs into editable PowerPoint slides.
+Convert infographic-style PNGs into editable PowerPoint slides. This works surprisingly well but it's not perfect - have gimp or photoshop ready to make some edits. 
 
 `png2pptx` keeps the source image as the slide background, OCRs text out of the PNG, and recreates that text as editable PowerPoint text boxes so you can update labels and copy without rebuilding the slide by hand.
 
@@ -10,17 +10,9 @@ Convert infographic-style PNGs into editable PowerPoint slides.
 
 - editable text overlays placed near their original positions
 - sampled text colors taken from the source image
-- optional background text removal via inpainting
+- background text removal via inpainting
 - aggressive OCR enabled by default for better recall
 - batch conversion: one input PNG per slide
-
-## Repo-safe example
-
-| Sample input | Generated output preview |
-| --- | --- |
-| ![Sample input](examples/sample_input.png) | ![Generated output preview](examples/sample_output_preview.png) |
-
-The sample assets are safe to publish and are included so the README shows what the tool is trying to produce before you run it yourself.
 
 ## Prerequisites
 
@@ -52,7 +44,7 @@ Convert the bundled example:
 png2pptx convert examples/sample_input.png -o sample_output.pptx
 ```
 
-By default, `png2pptx` now:
+By default, `png2pptx` uses:
 
 - uses `--ocr-mode aggressive`
 - uses `--remove-text`
@@ -110,6 +102,7 @@ The current beta intentionally keeps scope tight. Deferred work that should be p
 - optional second OCR backend support if Tesseract tops out on harder layouts
 - better font inference for closer visual matching
 - richer diagnostics for tuning difficult images
+- Better inpainting (see examples)
 
 ## Development
 
