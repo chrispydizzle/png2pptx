@@ -1,0 +1,52 @@
+# Current local/generated paths observed in this repo:
+# - .venv/
+# - .pytest_cache/
+# - build/
+# - png2pptx.egg-info/
+# - .artifacts/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Local/session artifacts
+.artifacts/
+
+# Generated outputs and diagnostics
+output*.pptx
+sample_output.pptx
+examples/sample_output.pptx
+result*.pptx
+*_fast.pptx
+*_aggressive*.pptx
+*_tuned*.pptx
+*_quality*.pptx
+*_clean.png
+*_clean_preview.png
+debug_overlay.png
+
+# OS files
+.DS_Store
+Thumbs.db
