@@ -33,6 +33,7 @@ pip-wheel-metadata/
 
 # Local/session artifacts
 .artifacts/
+quality_output/
 
 # Generated outputs and diagnostics
 output*.pptx

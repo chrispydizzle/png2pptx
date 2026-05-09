@@ -52,6 +52,7 @@ def group_into_blocks(
 
     # Remove noise blocks (tiny artifacts, single punctuation, etc.)
     blocks = _filter_noise(blocks)
+    blocks = _drop_orphan_trailing_fragments(blocks)
 
     if not merge_lines or len(blocks) <= 1:
         return blocks
@@ -65,7 +66,9 @@ _COMMON_SHORT_WORDS = {
     "i", "if", "in", "is", "it", "ml", "no", "of", "ok", "on", "or",
     "so", "to", "ui", "up", "us", "ux", "we",
 }
-_SHORT_STANDALONE_ALLOWLIST = {"data", "high", "low", "time"}
+_COMMON_SHORT_UNITS = {"cm", "db", "ft", "gb", "hz", "kb", "kg", "km", "mb", "mhz", "mm", "ms", "tb"}
+_ALLOWED_ALL_CAPS_SHORT_WORDS = {"ai", "al", "km", "ml", "no", "of", "ok", "ui", "us", "ux"}
+_SHORT_STANDALONE_ALLOWLIST = {"avg", "data", "high", "low", "time"}
 
 
 def _normalized_text(text: str) -> str:
@@ -73,7 +76,27 @@ def _normalized_text(text: str) -> str:
 
 
 def _is_number_marker(text: str, normalized: str) -> bool:
-    return bool(normalized) and normalized.isdigit() and bool(re.fullmatch(r"\d+[.)]?", text))
+    """A digit followed by `.` or `)` (e.g. `1.`, `2)`) used as a list marker."""
+    return bool(normalized) and normalized.isdigit() and bool(re.fullmatch(r"\d+[.)]", text))
+
+
+def _is_numeric_fragment(text: str, normalized: str) -> bool:
+    if not normalized or not normalized.isdigit():
+        return False
+
+    if not re.fullmatch(r"[$€£]?\d[\d,]*(?:[.\-–—:]\d[\d,]*)*[-–—.]?[)]?", text):
+        return False
+
+    # A bare single digit with no separator is too ambiguous to keep — it's
+    # almost always OCR noise from gridlines, ticks, or stray pixels.
+    if len(normalized) == 1 and re.fullmatch(r"\d", text):
+        return False
+
+    return True
+
+
+def _is_allowed_short_token(normalized: str) -> bool:
+    return normalized in _COMMON_SHORT_WORDS or normalized in _COMMON_SHORT_UNITS
 
 
 def _contains_symbolic_noise(text: str) -> bool:
@@ -93,19 +116,19 @@ def _is_noise_word(word: WordBox) -> bool:
         return normalized not in {"xai"} or len(normalized) <= 2
 
     if len(normalized) == 1:
-        if _is_number_marker(text, normalized):
+        if _is_number_marker(text, normalized) or _is_numeric_fragment(text, normalized):
             return False
         if normalized in {"a", "i"}:
             return word.confidence < 80.0 or word.width <= max(4, int(word.height * 0.2))
         return True
 
     if len(normalized) == 2 and text.isupper() and normalized not in {"ai", "al", "ok"}:
+        return normalized not in _ALLOWED_ALL_CAPS_SHORT_WORDS
+
+    if len(normalized) == 2 and text != text.lower() and not _is_allowed_short_token(normalized) and normalized not in {"ai", "al", "ok"}:
         return True
 
-    if len(normalized) == 2 and text != text.lower() and normalized not in _COMMON_SHORT_WORDS and normalized not in {"ai", "al", "ok"}:
-        return True
-
-    if len(normalized) == 2 and normalized not in _COMMON_SHORT_WORDS:
+    if len(normalized) == 2 and not _is_allowed_short_token(normalized):
         if text != text.lower():
             return True
         if word.confidence < 80.0:
@@ -113,7 +136,7 @@ def _is_noise_word(word: WordBox) -> bool:
         if word.width > word.height * 2.6 or word.height > word.width * 3.0:
             return True
 
-    if len(normalized) <= 3 and normalized not in _COMMON_SHORT_WORDS and word.confidence < 65.0:
+    if len(normalized) <= 3 and not _is_allowed_short_token(normalized) and word.confidence < 65.0 and not _is_numeric_fragment(text, normalized):
         return True
 
     if len(normalized) >= 5 and len(set(normalized)) <= 2 and word.confidence < 70.0:
@@ -143,10 +166,11 @@ def _is_edge_noise_word(word: WordBox) -> bool:
         and word.text.strip() != normalized
         and not word.text.strip().isalpha()
         and not _is_number_marker(word.text.strip(), normalized)
+        and not _is_numeric_fragment(word.text.strip(), normalized)
     ):
         return True
 
-    if len(normalized) <= 2 and normalized not in _COMMON_SHORT_WORDS and not _is_number_marker(word.text.strip(), normalized):
+    if len(normalized) <= 2 and not _is_allowed_short_token(normalized) and not _is_number_marker(word.text.strip(), normalized) and not _is_numeric_fragment(word.text.strip(), normalized):
         return True
 
     if word.width <= max(4, int(word.height * 0.2)):
@@ -167,8 +191,10 @@ def _is_weak_edge_word(word: WordBox) -> bool:
     if word.confidence < 65.0 and (len(normalized) <= 5 or text != normalized):
         return True
 
-    if len(normalized) <= 2 and word.confidence < 80.0 and normalized not in _COMMON_SHORT_WORDS:
-        return True
+    if len(normalized) <= 2 and word.confidence < 80.0 and not _is_allowed_short_token(normalized):
+        numeric_fragment = _is_numeric_fragment(text, normalized)
+        if not numeric_fragment or (len(normalized) <= 1 and word.confidence < 75.0):
+            return True
 
     return False
 
@@ -227,14 +253,21 @@ def _filter_noise(blocks: list[TextBlock]) -> list[TextBlock]:
     """Remove blocks that are OCR noise — tiny artifacts, punctuation-only, etc."""
     filtered = []
     for b in blocks:
+        text = b.text.strip()
+        normalized = _normalized_text(text)
         # Skip blocks with very small pixel height (sub-character noise)
         if b.height < 8:
             continue
         # Skip tiny blocks (both dimensions small — icon/graphic artifacts)
-        if b.width < 25 and b.height < 25:
+        numeric_fragment = _is_numeric_fragment(text, normalized)
+        avg_conf = sum(word.confidence for word in b.words) / len(b.words)
+        if (
+            b.width < 25
+            and b.height < 25
+            and not (numeric_fragment and (len(normalized) > 1 or avg_conf >= 75.0))
+        ):
             continue
         # Skip single-character blocks that aren't alphanumeric
-        text = b.text.strip()
         if len(text) <= 1 and not text.isalnum():
             continue
         # Skip blocks that are only punctuation/whitespace/underscores
@@ -243,23 +276,24 @@ def _filter_noise(blocks: list[TextBlock]) -> list[TextBlock]:
         # Skip blocks where estimated font is unreasonably large (graphic artifacts)
         if b.estimated_font_size_px > 100:
             continue
-        normalized = _normalized_text(text)
-        avg_conf = sum(word.confidence for word in b.words) / len(b.words)
         if len(b.words) == 1:
             word = b.words[0]
             if avg_conf < 60.0 and (len(normalized) <= 6 or text != normalized):
                 continue
             if (
                 len(normalized) <= 3
-                and normalized not in _COMMON_SHORT_WORDS
+                and not _is_allowed_short_token(normalized)
                 and not _is_number_marker(text, normalized)
+                and not _is_numeric_fragment(text, normalized)
                 and b.height <= 14
             ):
                 continue
             if (
                 len(normalized) <= 4
-                and normalized not in _COMMON_SHORT_WORDS
+                and not _is_allowed_short_token(normalized)
                 and normalized not in _SHORT_STANDALONE_ALLOWLIST
+                and not _is_numeric_fragment(text, normalized)
+                and not any(char.isdigit() for char in normalized)
                 and (text.isupper() or (text[:1].isalpha() and text[:1].isupper() and text[1:].islower()))
                 and avg_conf < 97.0
             ):
@@ -276,6 +310,48 @@ def _filter_noise(blocks: list[TextBlock]) -> list[TextBlock]:
     return filtered
 
 
+def _drop_orphan_trailing_fragments(blocks: list[TextBlock]) -> list[TextBlock]:
+    filtered: list[TextBlock] = []
+
+    for block in blocks:
+        if _is_orphan_trailing_fragment(block, blocks):
+            continue
+        filtered.append(block)
+
+    return filtered
+
+
+def _is_orphan_trailing_fragment(block: TextBlock, blocks: list[TextBlock]) -> bool:
+    if len(block.words) != 1:
+        return False
+
+    word = block.words[0]
+    text = word.text.strip()
+    normalized = _normalized_text(text)
+    if len(normalized) < 3 or len(normalized) > 5:
+        return False
+    if text != text.lower() or not normalized.isalpha():
+        return False
+    if word.confidence >= 75.0:
+        return False
+    if block.width > max(70, int(block.height * 4.0)):
+        return False
+
+    for other in blocks:
+        if other is block:
+            continue
+        if _range_overlap_on_smaller(block.y, block.bottom, other.y, other.bottom) < 0.55:
+            continue
+        if block.x <= other.right:
+            continue
+
+        horizontal_gap = block.x - other.right
+        if horizontal_gap >= max(block.height, other.height) * 4.0 + 36.0:
+            return True
+
+    return False
+
+
 def _split_wide_gaps(
     words: list[WordBox],
     gap_factor: float,
@@ -289,7 +365,9 @@ def _split_wide_gaps(
     gaps = [max(0, current.x - previous.right) for previous, current in zip(sorted_words, sorted_words[1:])]
     positive_gaps = [gap for gap in gaps if gap > 0]
     median_gap = 0 if not positive_gaps else sorted(positive_gaps)[len(positive_gaps) // 2]
-    threshold = max(median_h * gap_factor, median_gap * 4)
+    local_gaps = [gap for gap in positive_gaps if gap <= median_h * 4.0]
+    reference_gap = median_gap if not local_gaps else sorted(local_gaps)[len(local_gaps) // 2]
+    threshold = max(median_h * gap_factor, reference_gap * 3.0)
 
     groups: list[list[WordBox]] = [[sorted_words[0]]]
     for w in sorted_words[1:]:
@@ -317,6 +395,15 @@ def _box_overlap_on_smaller(a: WordBox, b: WordBox) -> float:
         return 0.0
 
     return intersection / smaller
+
+
+def _range_overlap_on_smaller(start_a: int, end_a: int, start_b: int, end_b: int) -> float:
+    overlap = max(0, min(end_a, end_b) - max(start_a, start_b))
+    smaller = min(end_a - start_a, end_b - start_b)
+    if smaller <= 0:
+        return 0.0
+
+    return float(overlap) / float(smaller)
 
 
 def _merge_nearby_blocks(

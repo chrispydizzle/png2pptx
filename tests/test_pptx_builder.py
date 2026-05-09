@@ -12,6 +12,7 @@ from png2pptx.pptx_builder import (
     SLIDE_LONG_EDGE_EMU,
     _compute_slide_dimensions,
     _fit_font_size_px,
+    _group_blocks_for_rendering,
     build_pptx,
 )
 
@@ -78,6 +79,32 @@ def test_text_boxes_created(tmp_path):
     text_shapes = [s for s in slide.shapes if s.has_text_frame]
     assert len(text_shapes) == 1
     assert "Hello" in text_shapes[0].text_frame.text
+
+
+def test_text_box_height_has_vertical_breathing_room(tmp_path):
+    img_path = _make_test_png(tmp_path)
+    out = tmp_path / "out.pptx"
+
+    block = TextBlock(
+        words=[
+            WordBox(text="Tight", x=100, y=100, width=200, height=20, confidence=95.0),
+        ],
+        color=(255, 0, 0),
+    )
+    slide_data = SlideData(
+        image_path=img_path,
+        image_width=800,
+        image_height=600,
+        text_blocks=[block],
+    )
+    build_pptx([slide_data], out)
+
+    prs = Presentation(str(out))
+    slide = prs.slides[0]
+    text_shape = [s for s in slide.shapes if s.has_text_frame][0]
+    scaled_height = int(block.height * (prs.slide_height / slide_data.image_height))
+
+    assert text_shape.height > scaled_height
 
 
 def test_empty_slides(tmp_path):
@@ -154,3 +181,91 @@ def test_width_aware_font_fitting_shrinks_long_text():
     long_size = _fit_font_size_px(long_block.text, long_block)
 
     assert long_size < short_size
+
+
+def test_group_blocks_for_rendering_merges_stacked_similar_lines():
+    blocks = [
+        TextBlock(
+            words=[WordBox(text="A wrapped paragraph line that continues", x=100, y=100, width=320, height=30, confidence=95.0)],
+            color=(10, 10, 10),
+        ),
+        TextBlock(
+            words=[WordBox(text="into a second line of the same thought.", x=104, y=136, width=320, height=30, confidence=95.0)],
+            color=(12, 12, 12),
+        ),
+    ]
+
+    groups = _group_blocks_for_rendering(blocks)
+
+    assert len(groups) == 1
+    assert [block.text for block in groups[0]] == [
+        "A wrapped paragraph line that continues",
+        "into a second line of the same thought.",
+    ]
+
+
+def test_group_blocks_for_rendering_keeps_same_row_columns_separate():
+    blocks = [
+        TextBlock(
+            words=[WordBox(text="Left", x=100, y=100, width=160, height=30, confidence=95.0)],
+            color=(10, 10, 10),
+        ),
+        TextBlock(
+            words=[WordBox(text="Right", x=500, y=102, width=160, height=30, confidence=95.0)],
+            color=(10, 10, 10),
+        ),
+    ]
+
+    groups = _group_blocks_for_rendering(blocks)
+
+    assert len(groups) == 2
+
+
+def test_group_blocks_for_rendering_keeps_stacked_independent_labels_separate():
+    blocks = [
+        TextBlock(
+            words=[WordBox(text="Accuracy", x=100, y=100, width=160, height=30, confidence=95.0)],
+            color=(10, 10, 10),
+        ),
+        TextBlock(
+            words=[WordBox(text="Reliability", x=102, y=136, width=180, height=30, confidence=95.0)],
+            color=(12, 12, 12),
+        ),
+    ]
+
+    groups = _group_blocks_for_rendering(blocks)
+
+    assert len(groups) == 2
+
+
+def test_build_pptx_uses_single_textbox_for_grouped_multiline_text(tmp_path):
+    img_path = _make_test_png(tmp_path)
+    out = tmp_path / "multiline.pptx"
+
+    blocks = [
+        TextBlock(
+            words=[WordBox(text="A wrapped paragraph line that continues", x=100, y=100, width=320, height=30, confidence=95.0)],
+            color=(0, 0, 0),
+        ),
+        TextBlock(
+            words=[WordBox(text="into a second line of the same thought.", x=104, y=136, width=320, height=30, confidence=95.0)],
+            color=(0, 0, 0),
+        ),
+    ]
+    slide_data = SlideData(
+        image_path=img_path,
+        image_width=800,
+        image_height=600,
+        text_blocks=blocks,
+    )
+    build_pptx([slide_data], out)
+
+    prs = Presentation(str(out))
+    text_shapes = [s for s in prs.slides[0].shapes if s.has_text_frame]
+
+    assert len(text_shapes) == 1
+    non_empty_paragraphs = [p.text for p in text_shapes[0].text_frame.paragraphs if p.text.strip()]
+    assert non_empty_paragraphs == [
+        "A wrapped paragraph line that continues",
+        "into a second line of the same thought.",
+    ]

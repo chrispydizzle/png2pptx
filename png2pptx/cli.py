@@ -10,6 +10,7 @@ from .layout import group_into_blocks
 from .models import SlideData
 from .ocr import extract_words
 from .pptx_builder import build_pptx
+from .quality import run_quality_loop
 from .styles import extract_text_colors
 
 
@@ -128,3 +129,74 @@ def convert(
             tf.unlink()
         except OSError:
             pass
+
+
+@main.command("quality-loop")
+@click.option(
+    "--examples-dir",
+    default="examples",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directory containing source example PNGs and optional baseline clean images.",
+)
+@click.option(
+    "--output-dir",
+    default="quality_output",
+    show_default=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory where current clean images, PPTX files, overlays, and summary.json are written.",
+)
+@click.option(
+    "--confidence",
+    default=40.0,
+    type=float,
+    show_default=True,
+    help="Minimum OCR confidence threshold (0-100).",
+)
+@click.option(
+    "--lang",
+    default="eng",
+    show_default=True,
+    help="Tesseract language code (e.g. eng, fra, deu).",
+)
+@click.option(
+    "--ocr-mode",
+    type=click.Choice(["fast", "aggressive"], case_sensitive=False),
+    default="aggressive",
+    show_default=True,
+    help="OCR quality mode to benchmark.",
+)
+@click.option(
+    "--remove-text/--no-remove-text",
+    default=True,
+    help="Remove detected text from the background image before building each slide.",
+)
+def quality_loop(
+    examples_dir: Path,
+    output_dir: Path,
+    confidence: float,
+    lang: str,
+    ocr_mode: str,
+    remove_text: bool,
+):
+    """Generate benchmark artifacts for the example PNGs."""
+    results = run_quality_loop(
+        examples_dir=examples_dir,
+        output_dir=output_dir,
+        confidence=confidence,
+        lang=lang,
+        ocr_mode=ocr_mode,
+        remove_background_text=remove_text,
+    )
+    if not results:
+        raise click.ClickException(f"No example PNGs found in {examples_dir}")
+
+    click.echo(f"Wrote quality artifacts to {output_dir}", err=True)
+    click.echo(f"Summary: {output_dir / 'summary.json'}", err=True)
+    for result in results:
+        baseline = "n/a" if result.baseline_mae is None else f"{result.baseline_mae:.2f}"
+        click.echo(
+            f"{result.name}: words={result.word_count}, blocks={result.block_count}, "
+            f"shapes={result.pptx_text_shapes}, baseline_mae={baseline}",
+            err=True,
+        )

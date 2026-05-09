@@ -249,3 +249,62 @@ def test_group_into_blocks_keeps_titlecase_common_short_word():
 
     assert len(blocks) == 1
     assert blocks[0].text == "It helps"
+
+
+def test_group_into_blocks_keeps_all_caps_common_short_words_and_units():
+    words = [
+        _make_word("THE", 10, 10, w=50, h=30),
+        _make_word("STRUCTURE", 70, 10, w=180, h=30),
+        _make_word("OF", 268, 10, w=34, h=30),
+        _make_word("PLANET", 320, 10, w=120, h=30),
+        _make_word("EARTH", 452, 10, w=105, h=30),
+        _make_word("CRUST", 10, 60, w=60, h=20, line=2),
+        _make_word("(0-100", 80, 60, w=70, h=20, line=2),
+        _make_word("KM", 158, 60, w=28, h=20, line=2),
+        _make_word("DEPTH)", 196, 60, w=70, h=20, line=2),
+    ]
+
+    blocks = group_into_blocks(words)
+
+    assert [block.text for block in blocks] == [
+        "THE STRUCTURE OF PLANET EARTH",
+        "CRUST (0-100 KM DEPTH)",
+    ]
+
+
+def test_group_into_blocks_splits_map_label_from_table_row():
+    words = [
+        _make_word("100", 708, 220, w=28, h=13),
+        _make_word("CRUST", 944, 222, w=42, h=13),
+        _make_word("0-", 1045, 222, w=15, h=13),
+        _make_word("100", 1067, 222, w=21, h=12),
+        _make_word("Solid", 1152, 222, w=29, h=13),
+        _make_word("0-", 1241, 223, w=15, h=12),
+        _make_word("1,000", 1263, 223, w=33, h=14),
+    ]
+
+    blocks = group_into_blocks(words)
+
+    assert [block.text for block in blocks] == [
+        "100",
+        "CRUST",
+        "0- 100",
+        "Solid",
+        "0- 1,000",
+    ]
+
+
+def test_group_into_blocks_drops_low_confidence_orphan_trailing_fragment():
+    words = [
+        _make_word("Remove", 795, 322, w=86, h=18, confidence=92.0),
+        _make_word("baked-in", 891, 322, w=93, h=18, confidence=92.0),
+        _make_word("text", 994, 322, w=42, h=18, confidence=92.0),
+        _make_word("so", 1046, 322, w=26, h=18, confidence=92.0),
+        _make_word("overlays", 1082, 322, w=96, h=18, confidence=92.0),
+        _make_word("doub", 1346, 318, w=50, h=17, confidence=68.0),
+    ]
+
+    blocks = group_into_blocks(words)
+
+    assert len(blocks) == 1
+    assert blocks[0].text == "Remove baked-in text so overlays"

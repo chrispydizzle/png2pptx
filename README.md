@@ -114,4 +114,12 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
+Generate a repeatable quality baseline from the checked-in examples:
+
+```bash
+png2pptx quality-loop --examples-dir examples --output-dir quality_output
+```
+
+This writes per-example PPTX files, current clean images, overlay review images, and a `summary.json` file for before/after comparisons while tuning OCR, layout, or inpainting behavior.
+
 Before opening a public-facing PR, make sure docs stay aligned with real CLI behavior and avoid committing local/generated artifacts such as virtualenvs, build outputs, or ad-hoc debug exports.

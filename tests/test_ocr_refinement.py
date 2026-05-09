@@ -1,6 +1,11 @@
 from png2pptx.layout import group_into_blocks
 from png2pptx.models import WordBox
-from png2pptx.ocr import _LocalOcrRegion, _normalize_ai_confusions, _replace_region_lines
+from png2pptx.ocr import (
+    _LocalOcrRegion,
+    _merge_aggressive_passes,
+    _normalize_ai_confusions,
+    _replace_region_lines,
+)
 
 
 def _make_word(text, x, y, w=60, h=28, confidence=96.0):
@@ -134,3 +139,16 @@ def test_replace_region_lines_keeps_stronger_existing_line():
     assert "Model deployment is not a final handoff. It is an ongoing cycle of explanation," in texts
     assert "monitoring, review, and improvement in a live production environment." in texts
     assert not any("raviaw" in text for text in texts)
+
+
+def test_merge_aggressive_passes_keeps_numeric_range_fragments():
+    merged = _merge_aggressive_passes(
+        [
+            [
+                _make_word("0-", 10, 10, w=18, h=14, confidence=52.0),
+                _make_word("100", 34, 10, w=28, h=14, confidence=96.0),
+            ]
+        ]
+    )
+
+    assert [word.text for word in merged] == ["0-", "100"]

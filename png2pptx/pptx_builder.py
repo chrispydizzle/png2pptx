@@ -20,6 +20,8 @@ _EDGE_JUNK_RE = re.compile(r'^[_\-—–\s]+|[_\-—–\s]+$')
 _FONT_FAMILY = "Calibri"
 _FONT_WIDTH_PADDING = 1.05
 _FONT_HEIGHT_PADDING = 1.02
+_TEXTBOX_WIDTH_PADDING_RATIO = 0.05
+_TEXTBOX_HEIGHT_PADDING_RATIO = 0.12
 
 _FONT_PATH_CANDIDATES = (
     r"C:\Windows\Fonts\calibri.ttf",
@@ -100,12 +102,81 @@ def build_pptx(slides: list[SlideData], output_path: str | Path) -> Path:
         scale_x = slide_w / slide_data.image_width
         scale_y = slide_h / slide_data.image_height
 
-        # Add text boxes for each block
-        for block in slide_data.text_blocks:
-            _add_text_block(slide, block, scale_x, scale_y)
+        # Add text boxes for each block/group
+        for block_group in _group_blocks_for_rendering(slide_data.text_blocks):
+            _add_text_group(slide, block_group, scale_x, scale_y)
 
     prs.save(str(output_path))
     return output_path
+
+
+def _add_text_group(
+    slide,
+    blocks: list[TextBlock],
+    scale_x: float,
+    scale_y: float,
+) -> None:
+    if len(blocks) == 1:
+        _add_text_block(slide, blocks[0], scale_x, scale_y)
+        return
+
+    left_px = min(block.x for block in blocks)
+    top_px = min(block.y for block in blocks)
+    right_px = max(block.right for block in blocks)
+    bottom_px = max(block.bottom for block in blocks)
+
+    left_emu = int(left_px * scale_x)
+    top_emu = int(top_px * scale_y)
+    width_emu = int((right_px - left_px) * scale_x)
+    height_emu = int((bottom_px - top_px) * scale_y)
+
+    h_pad = int(width_emu * _TEXTBOX_WIDTH_PADDING_RATIO)
+    width_emu += h_pad
+    v_pad = max(Emu(1), int(height_emu * _TEXTBOX_HEIGHT_PADDING_RATIO))
+    top_emu = max(0, top_emu - (v_pad // 2))
+    height_emu += v_pad
+
+    txbox = slide.shapes.add_textbox(
+        Emu(left_emu), Emu(top_emu), Emu(width_emu), Emu(height_emu)
+    )
+
+    # Transparent background
+    txbox.fill.background()
+
+    tf = txbox.text_frame
+    tf.word_wrap = False
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    tf.margin_left = Emu(0)
+    tf.margin_right = Emu(0)
+    tf.margin_top = Emu(0)
+    tf.margin_bottom = Emu(0)
+    tf.auto_size = None
+    _configure_paragraph_defaults(tf.paragraphs[0])
+
+    for index, block in enumerate(sorted(blocks, key=lambda item: (item.y, item.x))):
+        para = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
+        _configure_paragraph_defaults(para)
+        para.alignment = PP_ALIGN.LEFT
+
+        clean_text = _EDGE_JUNK_RE.sub('', block.text)
+        rendered_text = clean_text if clean_text else block.text
+
+        run = para.add_run()
+        run.text = rendered_text
+
+        fitted_font_px = _fit_font_size_px(rendered_text, block)
+        font_size_pt = (fitted_font_px * scale_y) / EMU_PER_PT
+        font_size_pt = max(6.0, min(font_size_pt, 96.0))
+        run.font.size = Pt(font_size_pt)
+        run.font.name = _FONT_FAMILY
+
+        r, g, b = block.color
+        run.font.color.rgb = RGBColor(r, g, b)
+
+        if index + 1 < len(blocks):
+            next_block = blocks[index + 1]
+            gap_px = max(0, next_block.y - block.bottom)
+            para.space_after = Pt((gap_px * scale_y) / EMU_PER_PT)
 
 
 def _add_text_block(
@@ -125,8 +196,11 @@ def _add_text_block(
     height_emu = int(block.height * scale_y)
 
     # Minimal padding — just enough to avoid clipping the last character
-    h_pad = int(width_emu * 0.05)
+    h_pad = int(width_emu * _TEXTBOX_WIDTH_PADDING_RATIO)
     width_emu += h_pad
+    v_pad = max(Emu(1), int(height_emu * _TEXTBOX_HEIGHT_PADDING_RATIO))
+    top_emu = max(0, top_emu - (v_pad // 2))
+    height_emu += v_pad
 
     txbox = slide.shapes.add_textbox(
         Emu(left_emu), Emu(top_emu), Emu(width_emu), Emu(height_emu)
@@ -145,8 +219,7 @@ def _add_text_block(
 
     # Anchor text to the vertical middle of the box
     tf.auto_size = None
-    txbox.text_frame.paragraphs[0].space_before = Pt(0)
-    txbox.text_frame.paragraphs[0].space_after = Pt(0)
+    _configure_paragraph_defaults(txbox.text_frame.paragraphs[0])
 
     para = tf.paragraphs[0]
     para.alignment = PP_ALIGN.LEFT
@@ -165,6 +238,76 @@ def _add_text_block(
     # Font color
     r, g, b = block.color
     run.font.color.rgb = RGBColor(r, g, b)
+
+
+def _configure_paragraph_defaults(paragraph) -> None:
+    paragraph.space_before = Pt(0)
+    paragraph.space_after = Pt(0)
+
+
+def _group_blocks_for_rendering(blocks: list[TextBlock]) -> list[list[TextBlock]]:
+    if not blocks:
+        return []
+
+    sorted_blocks = sorted(blocks, key=lambda block: (block.y, block.x))
+    groups: list[list[TextBlock]] = [[sorted_blocks[0]]]
+    for block in sorted_blocks[1:]:
+        current_group = groups[-1]
+        if _should_group_blocks(current_group[-1], block):
+            current_group.append(block)
+        else:
+            groups.append([block])
+
+    return groups
+
+
+def _should_group_blocks(previous: TextBlock, current: TextBlock) -> bool:
+    vertical_gap = current.y - previous.bottom
+    if vertical_gap < -2:
+        return False
+    if vertical_gap > max(previous.height, current.height) * 1.2 + 8.0:
+        return False
+
+    prev_center_x = previous.x + (previous.width / 2)
+    current_center_x = current.x + (current.width / 2)
+    left_close = abs(previous.x - current.x) <= max(28, max(previous.height, current.height) * 2.0)
+    center_close = abs(prev_center_x - current_center_x) <= max(40, max(previous.width, current.width) * 0.12)
+    if not left_close and not center_close:
+        return False
+
+    prev_font = max(previous.estimated_font_size_px, 1.0)
+    current_font = max(current.estimated_font_size_px, 1.0)
+    font_ratio = min(prev_font, current_font) / max(prev_font, current_font)
+    if font_ratio < 0.8:
+        return False
+
+    if _color_distance(previous.color, current.color) > 60.0:
+        return False
+
+    return _has_multiline_continuation_signal(previous.text, current.text)
+
+
+def _has_multiline_continuation_signal(previous_text: str, current_text: str) -> bool:
+    previous_text = previous_text.strip()
+    current_text = current_text.strip()
+    if not previous_text or not current_text:
+        return False
+
+    current_first = current_text[:1]
+    if current_first.islower() or current_first.isdigit():
+        return True
+
+    if previous_text.endswith((",", ";", ":", "-", "/", "(")):
+        return True
+
+    if len(previous_text) >= 28 and previous_text[-1:] not in ".!?":
+        return True
+
+    return False
+
+
+def _color_distance(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
 def _fit_font_size_px(text: str, block: TextBlock) -> float:

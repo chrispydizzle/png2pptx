@@ -14,10 +14,11 @@ from .models import WordBox
 
 _AGGRESSIVE_COMMON_SHORT_WORDS = {
     "a", "ai", "al", "an", "as", "at", "be", "by", "do", "go", "he",
-    "hi", "i", "if", "in", "is", "it", "low", "max", "min", "ml", "no",
-    "of", "ok", "on", "or", "so", "to", "ui", "up", "us", "ux", "we",
-    "xai",
+    "hi", "i", "if", "in", "is", "it", "km", "low", "max", "min", "ml",
+    "no", "of", "ok", "on", "or", "so", "to", "ui", "up", "us", "ux",
+    "we", "xai",
 }
+_AGGRESSIVE_UPPER_SHORT_WORDS = {"ai", "al", "km", "ml", "no", "of", "ok", "ui", "us", "ux"}
 _AI_CONTEXT_WORDS = {
     "accuracy", "adaptation", "ai", "data", "deployed", "deployment",
     "deployments", "drift", "explainable", "fairness", "model", "models",
@@ -137,6 +138,14 @@ def _extract_words_aggressive(
             config="--oem 3 --psm 6",
         )
     )
+    pass_results.append(
+        _run_ocr_pass(
+            img,
+            lang=lang,
+            confidence_threshold=confidence_threshold,
+            config="--oem 3 --psm 11",
+        )
+    )
 
     for variant_image, config, scale in _build_aggressive_variants(img):
         pass_results.append(
@@ -149,6 +158,14 @@ def _extract_words_aggressive(
             )
         )
 
+    pass_results.extend(
+        _run_high_contrast_sparse_passes(
+            img,
+            lang=lang,
+            confidence_threshold=confidence_threshold,
+        )
+    )
+
     merged = _reindex_words_by_geometry(_deduplicate_words(_merge_aggressive_passes(pass_results)))
     refined = _refine_with_local_crops(
         img,
@@ -156,7 +173,7 @@ def _extract_words_aggressive(
         lang=lang,
         confidence_threshold=confidence_threshold,
     )
-    return _normalize_ai_confusions(refined)
+    return _normalize_numeric_separators(_normalize_ai_confusions(refined))
 
 
 def _build_aggressive_variants(
@@ -187,6 +204,73 @@ def _build_aggressive_variants(
         (Image.fromarray(otsu), "--oem 3 --psm 11", scale),
         (Image.fromarray(adaptive), "--oem 3 --psm 11", scale),
     ]
+
+
+def _run_high_contrast_sparse_passes(
+    img: Image.Image,
+    lang: str,
+    confidence_threshold: float,
+) -> list[list[WordBox]]:
+    """Run sparse OCR on a high-contrast mask for small labels and tables.
+
+    Two scales are used so very small labels (units, depth tags) and the
+    larger sparse blueprint labels are both recovered.
+    """
+    rgb = np.array(img.convert("RGB"))
+    img_height = rgb.shape[0]
+
+    passes: list[list[WordBox]] = []
+    for scale in (2.0, 3.0):
+        upscaled = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        hsv = cv2.cvtColor(upscaled, cv2.COLOR_RGB2HSV)
+        hue = hsv[:, :, 0]
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+
+        bright_text = (
+            (value > 125)
+            & (
+                (saturation < 80)
+                | ((hue > 25) & (hue < 55))
+            )
+        ).astype(np.uint8) * 255
+        bright_text = cv2.morphologyEx(
+            bright_text,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+        )
+        ocr_image = Image.fromarray(cv2.bitwise_not(bright_text))
+
+        words = _run_ocr_pass(
+            ocr_image,
+            lang=lang,
+            confidence_threshold=confidence_threshold,
+            config="--oem 3 --psm 11",
+            scale=scale,
+        )
+        passes.append(
+            [
+                word
+                for word in words
+                if word.y > img_height * 0.14 or word.height <= 24
+            ]
+        )
+
+    # A higher-resolution sparse pass on the original image picks up
+    # small isolated labels (e.g. table cell text, depth markers) that
+    # the scale=2 variants smear together.
+    upscaled_rgb = cv2.resize(rgb, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    passes.append(
+        _run_ocr_pass(
+            Image.fromarray(upscaled_rgb),
+            lang=lang,
+            confidence_threshold=confidence_threshold,
+            config="--oem 3 --psm 11",
+            scale=3.0,
+        )
+    )
+
+    return passes
 
 
 def _refine_with_local_crops(
@@ -250,7 +334,7 @@ def _build_local_refinement_regions(
         and region.text_char_count >= 18
         and region.width >= 160
         and region.height <= max_region_height
-        and 16.0 <= region.median_height <= 60.0
+        and 11.0 <= region.median_height <= 60.0
         and _region_should_run_local_ocr(region, image_height)
     ]
     candidates.sort(key=lambda region: (len(region.lines), region.text_char_count), reverse=True)
@@ -341,7 +425,12 @@ def _run_local_crop_ocr(
     crop = np.array(img.crop((x0, y0, x1, y1)).convert("RGB"))
     gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
 
-    scale = 2.5 if region.median_height < 34.0 else 2.0
+    if region.median_height < 18.0:
+        scale = 4.0
+    elif region.median_height < 34.0:
+        scale = 2.5
+    else:
+        scale = 2.0
     upscaled = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     contrast = cv2.convertScaleAbs(upscaled, alpha=1.8, beta=0)
     blurred = cv2.GaussianBlur(contrast, (0, 0), 1.0)
@@ -368,6 +457,15 @@ def _run_local_crop_ocr(
             y_offset=y0,
         ),
         _run_ocr_pass(
+            Image.fromarray(sharpened),
+            lang=lang,
+            confidence_threshold=confidence_threshold,
+            config="--oem 3 --psm 11",
+            scale=scale,
+            x_offset=x0,
+            y_offset=y0,
+        ),
+        _run_ocr_pass(
             Image.fromarray(otsu),
             lang=lang,
             confidence_threshold=confidence_threshold,
@@ -378,7 +476,16 @@ def _run_local_crop_ocr(
         ),
     ]
 
-    return _deduplicate_words(_merge_aggressive_passes(local_passes))
+    merged = _deduplicate_words(_merge_aggressive_passes(local_passes))
+    # Local crops produce false detections when one variant happens to
+    # find a tall noisy blob. Drop candidates whose height is more than
+    # roughly twice the region's typical line height — they are almost
+    # always straddling multiple actual lines and would corrupt line
+    # grouping downstream.
+    if region.median_height > 0:
+        max_height = max(int(region.median_height * 1.8), 24)
+        merged = [word for word in merged if word.height <= max_height]
+    return merged
 
 
 def _replace_region_lines(
@@ -502,12 +609,29 @@ def _should_replace_line(existing_line: list[WordBox], candidate_line: list[Word
 
 def _should_add_line(candidate_line: list[WordBox]) -> bool:
     avg_confidence = sum(word.confidence for word in candidate_line) / len(candidate_line)
-    return (
+    if (
         len(candidate_line) >= 3
         and _line_char_count(candidate_line) >= 14
         and avg_confidence >= 88.0
         and _line_quality_score(candidate_line) >= 220.0
-    )
+    ):
+        return True
+
+    # Accept short high-confidence isolated tokens (e.g. unit labels like
+    # "(KM)", "(°C)" sitting on their own line in a table). These are
+    # commonly missed by the global passes but recovered cleanly by
+    # local crops, and rejecting them loses meaningful editable text.
+    if (
+        len(candidate_line) <= 2
+        and avg_confidence >= 90.0
+        and any(
+            word.text.startswith("(") and word.text.endswith(")") and len(_normalize_text(word.text)) >= 1
+            for word in candidate_line
+        )
+    ):
+        return True
+
+    return False
 
 
 def _should_replace_region(
@@ -592,6 +716,50 @@ def _normalize_ai_like_token(
         replacement = f"{core[:-2]}AI"
 
     return f"{prefix}{replacement}{suffix}"
+
+
+_NUMERIC_SEPARATOR_PATTERN = re.compile(r"^([$€£]?)(\d{1,3})([.,;:])(\d{3})([.,]\d+)?([)\]]?)$")
+
+
+def _normalize_numeric_separators(words: list[WordBox]) -> list[WordBox]:
+    """Detect comma-style thousands when the page already uses commas elsewhere.
+
+    OCR commonly mis-reads `,` as `.` `;` or `:` for very small numeric labels.
+    When the document otherwise uses `,` as the thousands separator, we rewrite
+    `X.XXX` / `X;XXX` / `X:XXX` style fragments to `X,XXX`. This is conservative
+    — purely-decimal numbers (e.g. `1.5`, `$3.99`) are not rewritten because
+    they don't have exactly three digits after the separator.
+    """
+    has_thousands_comma = any(
+        re.search(r"\d,\d{3}", word.text) for word in words
+    )
+    if not has_thousands_comma:
+        return words
+
+    rewritten: list[WordBox] = []
+    for word in words:
+        text = word.text
+        match = _NUMERIC_SEPARATOR_PATTERN.match(text)
+        if match and match.group(3) != ",":
+            prefix, head, _separator, tail, tail_extra, closing = match.groups()
+            new_text = f"{prefix}{head},{tail}{tail_extra or ''}{closing}"
+            rewritten.append(
+                WordBox(
+                    text=new_text,
+                    x=word.x,
+                    y=word.y,
+                    width=word.width,
+                    height=word.height,
+                    confidence=word.confidence,
+                    line_num=word.line_num,
+                    block_num=word.block_num,
+                    par_num=word.par_num,
+                )
+            )
+        else:
+            rewritten.append(word)
+
+    return rewritten
 
 
 def _line_bounds(words: list[WordBox]) -> tuple[int, int, int, int]:
@@ -735,7 +903,58 @@ def _merge_aggressive_passes(pass_results: list[list[WordBox]]) -> list[WordBox]
         if chosen is not None:
             merged.append(chosen)
 
+    merged = _restore_numeric_fragments(merged, pass_results)
     return sorted(merged, key=lambda word: (word.y, word.x))
+
+
+def _restore_numeric_fragments(
+    merged: list[WordBox],
+    pass_results: list[list[WordBox]],
+) -> list[WordBox]:
+    restored = list(merged)
+    candidates = [
+        word
+        for pass_words in pass_results
+        for word in pass_words
+        if _is_numeric_marker_text(word.text.strip(), _normalize_text(word.text))
+        and word.confidence >= 75.0
+    ]
+
+    for candidate in sorted(candidates, key=lambda word: (word.y, word.x, -word.confidence)):
+        if any(_numeric_fragment_is_represented(candidate, existing) for existing in restored):
+            continue
+        if any(_numeric_fragment_conflicts(candidate, existing) for existing in restored):
+            continue
+        restored.append(candidate)
+
+    return restored
+
+
+def _numeric_fragment_is_represented(candidate: WordBox, existing: WordBox) -> bool:
+    candidate_normalized = _normalize_text(candidate.text)
+    existing_normalized = _normalize_text(existing.text)
+    if not candidate_normalized or not existing_normalized:
+        return False
+
+    if candidate_normalized != existing_normalized and candidate_normalized not in existing_normalized and existing_normalized not in candidate_normalized:
+        return False
+
+    if _candidate_region_score(candidate, existing) >= 0.25:
+        return True
+
+    vertical_overlap = _range_overlap_on_smaller(candidate.y, candidate.bottom, existing.y, existing.bottom)
+    center_y_close = abs(candidate.center_y - existing.center_y) <= max(candidate.height, existing.height) * 0.75
+    horizontal_gap = _range_gap(candidate.x, candidate.right, existing.x, existing.right)
+    return (vertical_overlap >= 0.35 or center_y_close) and horizontal_gap <= max(candidate.width, existing.width) * 0.35 + 8.0
+
+
+def _numeric_fragment_conflicts(candidate: WordBox, existing: WordBox) -> bool:
+    candidate_normalized = _normalize_text(candidate.text)
+    existing_normalized = _normalize_text(existing.text)
+    if candidate_normalized in existing_normalized or existing_normalized in candidate_normalized:
+        return False
+
+    return _box_overlap_on_smaller(candidate, existing) >= 0.65
 
 
 def _select_cluster_candidate(cluster: list[tuple[int, WordBox]]) -> WordBox | None:
@@ -804,11 +1023,20 @@ def _is_suspicious_candidate(word: WordBox) -> bool:
     if _is_numeric_marker_text(text, normalized):
         return False
 
+    # Parenthetical unit-style tokens like (KM), (°C), (FT), (s) are
+    # legitimate even when short. Allow them when they have an opening
+    # paren and at least one alphanumeric character.
+    if text.startswith("(") and text.endswith(")") and len(normalized) >= 1:
+        return False
+
     if len(normalized) == 1:
         return normalized not in {"a", "i"}
 
     if len(normalized) <= 3 and text != normalized:
-        return True
+        if text.isupper() and normalized not in _AGGRESSIVE_UPPER_SHORT_WORDS:
+            return True
+        if not text.isupper() and normalized not in _AGGRESSIVE_COMMON_SHORT_WORDS:
+            return True
 
     if len(normalized) <= 3 and normalized not in _AGGRESSIVE_COMMON_SHORT_WORDS:
         if word.height <= 14 or word.width <= 14:
@@ -838,6 +1066,24 @@ def _same_word_region(a: WordBox, b: WordBox) -> bool:
 
 
 def _candidate_region_score(a: WordBox, b: WordBox) -> float:
+    a_normalized = _normalize_text(a.text)
+    b_normalized = _normalize_text(b.text)
+    text_mismatch = (
+        bool(a_normalized)
+        and bool(b_normalized)
+        and a_normalized != b_normalized
+        and a_normalized not in b_normalized
+        and b_normalized not in a_normalized
+    )
+
+    # An over-tall noisy detection should not bridge two distinct words
+    # in adjacent rows. If the heights differ by ~2× and the texts don't
+    # agree, treat them as independent regions.
+    if text_mismatch:
+        height_ratio = min(a.height, b.height) / max(1, max(a.height, b.height))
+        if height_ratio < 0.5:
+            return 0.0
+
     iou = _box_iou(a, b)
     overlap = _box_overlap_on_smaller(a, b)
     if iou >= 0.25 or overlap >= 0.6:
@@ -858,7 +1104,10 @@ def _normalize_text(text: str) -> str:
 
 
 def _is_numeric_marker_text(text: str, normalized: str) -> bool:
-    return bool(normalized) and normalized.isdigit() and text.endswith((".", ")"))
+    if not normalized or not normalized.isdigit():
+        return False
+
+    return bool(re.fullmatch(r"[$€£]?\d[\d,]*(?:[.\-–—:]\d[\d,]*)*[-–—.]?[)]?", text))
 
 
 def _box_iou(a: WordBox, b: WordBox) -> float:
