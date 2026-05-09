@@ -985,10 +985,39 @@ def _select_cluster_candidate(cluster: list[tuple[int, WordBox]]) -> WordBox | N
         ),
     )
 
+    # When multiple same-text candidates share a cluster but one's bounding
+    # box is dramatically taller than the others, prefer the smaller one.
+    # Tesseract sometimes returns oversized bboxes that bleed into adjacent
+    # graphics; the smaller candidates are usually the correct visual region.
+    chosen = _prefer_smaller_same_text_candidate(chosen, best_group)
+
     if len({pass_id for pass_id, _word in best_group}) == 1 and _is_suspicious_candidate(chosen):
         return None
 
     return chosen
+
+
+def _prefer_smaller_same_text_candidate(
+    chosen: WordBox,
+    group: list[tuple[int, WordBox]],
+) -> WordBox:
+    if len(group) < 2:
+        return chosen
+
+    heights = sorted(word.height for _pid, word in group)
+    median_h = heights[len(heights) // 2]
+    if median_h <= 0 or chosen.height <= median_h * 1.6:
+        return chosen
+
+    candidates = [
+        word for _pid, word in group
+        if word.height <= median_h * 1.4
+        and word.confidence >= chosen.confidence - 12.0
+    ]
+    if not candidates:
+        return chosen
+
+    return max(candidates, key=lambda word: (word.confidence, word.width * word.height))
 
 
 def _candidate_group_score(group: list[tuple[int, WordBox]]) -> float:
